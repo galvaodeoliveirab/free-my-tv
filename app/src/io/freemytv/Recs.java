@@ -185,6 +185,9 @@ final class Recs {
     private final Context context;
     private final SharedPreferences cache;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
+    /** Personal: the next page's details and images, three at a time, ahead of → past the last card. */
+    private final ExecutorService ahead = Executors.newFixedThreadPool(3);
+    private final java.util.Set<String> aheadKeys = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final Handler main = new Handler(Looper.getMainLooper());
     private final List<Listener> listeners = new ArrayList<>();
     private final Map<String, Poster> posters = new LinkedHashMap<>();   // narrow-card portraits, same keys as images
@@ -341,6 +344,30 @@ final class Recs {
     void setPages(String kind, int n) {
         pages.put(tabKey(kind), Math.max(1, Math.min(n, MAX_SHOWN / Prefs.cards())));
         refreshIfStale();
+    }
+
+    /**
+     * Personal: near the end of a tab's cards, fetches the next page's details and images (to disk) in the background,
+     * so the page shows at once when it's asked for. Building the backdrops stays for when they show.
+     */
+    void prefetch(String kind) {
+        if (!hasKey(context)) return;
+        for (Pick p : now(kind, pages(kind) + 1)) {
+            File poster = posterFile(p);
+            if (p.detailed && hasImage(p) && (poster == null || poster.exists())) continue;
+            String k = key(p);
+            if (!aheadKeys.add(k)) continue;
+            ahead.execute(() -> {
+                try {
+                    if (!p.detailed) fetchDetails(p);
+                    if (p.pkg != null || p.rental) download(p);
+                } catch (Exception e) {
+                    AppLog.w("prefetch: " + e.getClass().getSimpleName());
+                } finally {
+                    aheadKeys.remove(k);
+                }
+            });
+        }
     }
 
     /** Personal: whether → past the last card would bring more. */
@@ -1009,10 +1036,15 @@ final class Recs {
         if (System.currentTimeMillis() < linkRetryAt) return;
         try {
             String link = "";
-            JSONArray found = new JSONObject(watchmode("/search/?search_field=tmdb_" + p.kind + "_id&search_value=" + p.id))
-                    .optJSONArray("title_results");
-            if (found != null && found.length() > 0) {
-                JSONArray sources = new JSONArray(watchmode("/title/" + found.getJSONObject(0).getInt("id") + "/sources/?regions=" + REGION));
+            // Personal: one call, not a search and then the sources: Watchmode takes TMDB's id ("movie-123", "tv-123").
+            JSONArray sources;
+            try {
+                sources = new JSONArray(watchmode("/title/" + p.kind + "-" + p.id + "/sources/?regions=" + REGION));
+            } catch (IOException e) {
+                if (!"Watchmode returned HTTP 404".equals(e.getMessage())) throw e;
+                sources = new JSONArray();   // a title Watchmode doesn't know: remembered as no link
+            }
+            {
                 String[] service = null;
                 for (String[] s : SERVICES) if (s[1].equals(p.app)) service = s;
                 for (int i = 0; service != null && i < sources.length() && link.isEmpty(); i++) {
@@ -1035,6 +1067,130 @@ final class Recs {
             linkRetryAt = System.currentTimeMillis() + 10 * 60_000L;   // quota or network: not again right away
             AppLog.w("watchmode: " + e.getMessage());
         }
+    }
+
+    // MARK: - Rentals' offers (personal: Watchmode, config.properties "watchmode_key")
+
+    /** Personal: one way to get a rental: a store, to rent or to buy, its qualities and prices, and the page that sells it. */
+    static final class Offer {
+        String store, pkg, url;
+        boolean buy;
+        String prices = "";   // "SD, HD, 4K · R$ 9,90", or "SD R$ 6,90 · HD R$ 9,90" when they differ
+        double lowest = Double.MAX_VALUE;
+    }
+
+    /** Watchmode's store names (lowercase, no spaces, start) → the name shown and the TV app that sells there. */
+    private static final String[][] OFFER_STORES = {
+        {"amazon", "Prime Video", "com.amazon.amazonvideo.livingroom"},
+        {"appletv", "Apple TV", "com.apple.atve.androidtv.appletv"},
+        {"itunes", "Apple TV", "com.apple.atve.androidtv.appletv"},
+        {"clarovideo", "Claro", "br.com.claro.now.smarttvclient"},
+        {"youtube", "YouTube", "com.google.android.youtube.tv"},
+        {"googleplay", "Google", "com.google.android.apps.tv.launcherx"},
+    };
+    private static final String[] FORMATS = {"SD", "HD", "4K"};
+    /** A rental's offers are asked again after a day (one call each; the free plan has 1,000 a month). */
+    private static final long OFFERS_EVERY = 24 * 3600_000L;
+
+    static boolean offersOn() {
+        return !Config.WATCHMODE_KEY.trim().isEmpty();
+    }
+
+    /** Personal: the rental's offers, cheapest first and renting before buying; `done` runs on the main thread, null on failure. */
+    void offers(Pick p, java.util.function.Consumer<List<Offer>> done) {
+        ahead.execute(() -> {
+            List<Offer> out = null;
+            try {
+                out = parseOffers(offerSources(p));
+            } catch (Exception e) {
+                AppLog.w("offers: " + e.getMessage());
+            }
+            List<Offer> result = out;
+            main.post(() -> done.accept(result));
+        });
+    }
+
+    private JSONArray offerSources(Pick p) throws IOException, org.json.JSONException {
+        String key = "wmr:" + p.id;
+        String saved = cache.getString(key, null);
+        int bar = saved == null ? -1 : saved.indexOf('|');
+        try {
+            if (bar > 0 && System.currentTimeMillis() - Long.parseLong(saved.substring(0, bar)) < OFFERS_EVERY) {
+                return new JSONArray(saved.substring(bar + 1));
+            }
+        } catch (NumberFormatException ignored) {
+        }
+        JSONArray sources;
+        try {
+            sources = new JSONArray(watchmode("/title/movie-" + p.id + "/sources/?regions=" + REGION));
+        } catch (IOException e) {
+            if (!"Watchmode returned HTTP 404".equals(e.getMessage())) throw e;
+            sources = new JSONArray();
+        }
+        cache.edit().putString(key, System.currentTimeMillis() + "|" + sources).apply();
+        return sources;
+    }
+
+    private static List<Offer> parseOffers(JSONArray sources) throws org.json.JSONException {
+        Map<String, Offer> offers = new LinkedHashMap<>();
+        Map<String, Map<String, Double>> formats = new HashMap<>();
+        for (int i = 0; i < sources.length(); i++) {
+            JSONObject s = sources.getJSONObject(i);
+            String type = s.optString("type");
+            if (!type.equals("rent") && !type.equals("buy")) continue;
+            String name = s.optString("name"), id = name.toLowerCase(Locale.ROOT).replace(" ", "");
+            if (id.contains("(via") || id.contains("channel")) continue;   // a channel inside another app
+            String shown = name, pkg = null;
+            for (String[] st : OFFER_STORES) {
+                if (id.startsWith(st[0])) {
+                    shown = st[1];
+                    pkg = st[2];
+                    break;
+                }
+            }
+            String k = shown + "|" + type;
+            Offer o = offers.get(k);
+            if (o == null) {
+                o = new Offer();
+                o.store = shown;
+                o.pkg = pkg;
+                o.buy = type.equals("buy");
+                offers.put(k, o);
+                formats.put(k, new HashMap<>());
+            }
+            String url = s.optString("web_url");
+            if (o.url == null && url.startsWith("https://")) o.url = url;
+            double price = s.isNull("price") ? Double.NaN : s.optDouble("price", Double.NaN);
+            String format = s.optString("format").toUpperCase(Locale.ROOT);
+            if (!format.isEmpty() && !formats.get(k).containsKey(format)) formats.get(k).put(format, price);
+            if (!Double.isNaN(price)) o.lowest = Math.min(o.lowest, price);
+        }
+        java.text.NumberFormat money = java.text.NumberFormat.getCurrencyInstance(Ui.locale());
+        try {
+            money.setCurrency(java.util.Currency.getInstance(new Locale("", REGION)));
+        } catch (IllegalArgumentException ignored) {
+        }
+        List<Offer> out = new ArrayList<>();
+        for (Map.Entry<String, Offer> en : offers.entrySet()) {
+            Offer o = en.getValue();
+            Map<String, Double> f = formats.get(en.getKey());
+            List<String> order = new ArrayList<>();
+            for (String q : FORMATS) if (f.containsKey(q)) order.add(q);
+            for (String q : f.keySet()) if (!order.contains(q)) order.add(q);
+            java.util.Set<Double> distinct = new java.util.HashSet<>(f.values());
+            List<String> parts = new ArrayList<>();
+            if (distinct.size() <= 1) {
+                Double price = distinct.isEmpty() ? Double.NaN : distinct.iterator().next();
+                if (!order.isEmpty()) parts.add(String.join(", ", order));
+                if (!price.isNaN()) parts.add(money.format(price));
+            } else {
+                for (String q : order) parts.add(f.get(q).isNaN() ? q : q + " " + money.format(f.get(q)));
+            }
+            o.prices = String.join(" · ", parts);
+            out.add(o);
+        }
+        out.sort((a, b) -> a.buy != b.buy ? (a.buy ? 1 : -1) : Double.compare(a.lowest, b.lowest));
+        return out;
     }
 
     private static String watchmode(String path) throws IOException {
@@ -1201,19 +1357,21 @@ final class Recs {
     // MARK: - Images (TMDB originals on disk, up to 24 so the whole list fits; this hour's kept ready in memory)
 
     private void download(Pick p) throws IOException {
+        // Personal: the poster first: it's small, and most cards on screen are the narrow ones that show it.
+        File poster = posterFile(p);
+        if (poster != null && !poster.exists()) {
+            try {   // the narrow cards: without a poster they crop the backdrop
+                fetchFile(poster, p.id < 0
+                        ? plexOpen("/photo/:/transcode?width=500&height=750&minSize=1&url=" + URLEncoder.encode(p.poster, "UTF-8"))
+                        : (HttpURLConnection) new URL(POSTERS + p.poster).openConnection());
+            } catch (IOException e) {
+                AppLog.w("poster: " + e.getMessage());
+            }
+        }
         File f = imageFile(p);
         if (!f.exists()) fetchFile(f, p.id < 0
                 ? plexOpen("/photo/:/transcode?width=1920&height=1080&minSize=1&url=" + URLEncoder.encode(p.backdrop, "UTF-8"))
                 : (HttpURLConnection) new URL(IMAGES + p.backdrop).openConnection());
-        File poster = posterFile(p);
-        if (poster == null || poster.exists()) return;
-        try {   // the narrow cards: without a poster they crop the backdrop
-            fetchFile(poster, p.id < 0
-                    ? plexOpen("/photo/:/transcode?width=500&height=750&minSize=1&url=" + URLEncoder.encode(p.poster, "UTF-8"))
-                    : (HttpURLConnection) new URL(POSTERS + p.poster).openConnection());
-        } catch (IOException e) {
-            AppLog.w("poster: " + e.getMessage());
-        }
     }
 
     private File posterFile(Pick p) {
@@ -1346,12 +1504,13 @@ final class Recs {
             Set<String> keep = new HashSet<>();
             for (Pick p : picks) keep.add(linkKey(p));
             for (String k : cache.getAll().keySet()) if ((k.startsWith("wm:") || k.startsWith("wm2:")) && !k.equals("wm:refused") && !keep.contains(k)) e.remove(k);
-            // IMDb ratings older than twice their life go (a title back in the list asks again).
+            // IMDb ratings and rentals' offers older than twice their life go (a title back in the list asks again).
             for (Map.Entry<String, ?> en : cache.getAll().entrySet()) {
-                if (!en.getKey().startsWith("imdb:")) continue;
+                boolean imdb = en.getKey().startsWith("imdb:");
+                if (!imdb && !en.getKey().startsWith("wmr:")) continue;
                 String v = String.valueOf(en.getValue());
                 try {
-                    if (System.currentTimeMillis() - Long.parseLong(v.substring(0, v.indexOf('|'))) > 2 * IMDB_EVERY) e.remove(en.getKey());
+                    if (System.currentTimeMillis() - Long.parseLong(v.substring(0, v.indexOf('|'))) > 2 * (imdb ? IMDB_EVERY : OFFERS_EVERY)) e.remove(en.getKey());
                 } catch (RuntimeException bad) {
                     e.remove(en.getKey());
                 }

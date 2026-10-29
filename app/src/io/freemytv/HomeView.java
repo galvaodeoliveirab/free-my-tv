@@ -181,7 +181,14 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     // Holding OK on a card: a small menu (hide it, open the app, cancel) on its own layer, drawn only while it shows.
     private static final float MENU_W = 720, MENU_PAD = 44, MENU_INSET = 16, MENU_ROW = 76, MENU_STEP = 80, MENU_R = 36;
     private final Spring menu = new Spring(0.26f, 0.86f, 0), menuPick = new Spring(0.22f, 0.9f, 0);
-    private final String[] menuOptions = new String[3];
+    private String[] menuOptions = new String[3];
+    // Personal: the Rentals menu (OK on a Rentals card): one row per store and rent or buy, its prices on the right.
+    private static final float RENT_MENU_W = 980;
+    private float menuWidth = MENU_W;
+    private String[] menuRight;
+    private boolean rentMenu, rentLoading;
+    private Recs.Pick rentPick;
+    private List<Recs.Offer> rentOffers;
     private final RectF menuPanel = new RectF();
     private final Set<String> hiddenNow = new HashSet<>();   // hidden this session (a reload already under way may not know)
     private boolean menuOpen;
@@ -2694,6 +2701,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             return;
         } else if (zone == Z_CARDS) {
             Recs.Pick p = cardIndex < cards.size() ? cards.get(cardIndex) : null;
+            if (p != null && p.rental) {
+                openRental(p);
+                return;
+            }
             if (p == null || p.pkg == null) return;
             it = HomeApps.app(p.pkg, Recs.serviceName(p), p.link);
             r = cardRects[cardIndex];
@@ -3612,6 +3623,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private void showMenu() {
         if (menuOpen || !canHold() || menuTitlePaint == null) return;
         menuItem = watching.get(watchIndex);
+        rentMenu = false;
+        menuRight = null;
+        menuWidth = MENU_W;
+        menuOptions = new String[3];
         float width = (MENU_W - 2 * MENU_PAD) * k;
         String title = menuItem.title + (menuItem.episode != null ? " · " + menuItem.episode : "");
         menuTitle = TextUtils.ellipsize(title, new TextPaint(menuTitlePaint), width, TextUtils.TruncateAt.END).toString();
@@ -3634,9 +3649,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     /** The panel, centered on the screen: title, the app's name (if known) and the three options. */
     private void layoutMenu() {
-        float rows = (MENU_PAD + 34 + (menuSub.isEmpty() ? 0 : 38) + 32 + 2 * MENU_STEP + MENU_ROW + MENU_INSET) * k;
-        float left = (w - MENU_W * k) / 2, top = (h - rows) / 2;
-        menuPanel.set(left, top, left + MENU_W * k, top + rows);
+        float rows = (MENU_PAD + 34 + (menuSub.isEmpty() ? 0 : 38) + 32 + (menuOptions.length - 1) * MENU_STEP + MENU_ROW + MENU_INSET) * k;
+        float left = (w - menuWidth * k) / 2, top = (h - rows) / 2;
+        menuPanel.set(left, top, left + menuWidth * k, top + rows);
         menuOptionsTop = top + (MENU_PAD + 34 + (menuSub.isEmpty() ? 0 : 38) + 32) * k;
     }
 
@@ -3712,6 +3727,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         WatchNext.Item it = menuItem;
         int choice = menuIndex;
         closeMenu(false);
+        if (rentMenu) {
+            pickOffer(choice);
+            return;
+        }
         if (it == null) return;
         if (choice == 0) {
             click.open();
@@ -3778,11 +3797,101 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         for (int i = 0; i < menuOptions.length; i++) {
             menuRow(i, tmp);
             float f = Ui.clamp(1 - Math.abs(pick - i));
-            int base = i == 0 ? tone(0xFFD70015, 0xFFFF6961) : ink;   // hiding is the destructive one: red
+            int base = i == 0 && !rentMenu ? tone(0xFFD70015, 0xFFFF6961) : ink;   // hiding is the destructive one: red
             menuOptionPaint.setColor(Ui.alpha(blend(base, onPill, f), a));
             c.drawText(menuOptions[i], tmp.left + 28 * k, tmp.centerY() + Ui.halfCap(menuOptionPaint), menuOptionPaint);
+            if (menuRight != null && i < menuRight.length && !menuRight[i].isEmpty()) {
+                c.drawText(menuRight[i], tmp.right - 28 * k - menuOptionPaint.measureText(menuRight[i]),
+                        tmp.centerY() + Ui.halfCap(menuOptionPaint), menuOptionPaint);
+            }
         }
         c.restore();
+    }
+
+    // MARK: - Rentals (personal): OK on a card shows where to rent or buy it, with prices (Watchmode)
+
+    /** Without a Watchmode key, or when it has no offers, OK opens the first store's app as before. */
+    private void openRental(Recs.Pick p) {
+        if (!Recs.offersOn()) {
+            openRentalApp(p);
+            return;
+        }
+        if (rentLoading) return;
+        rentLoading = true;
+        click.open();
+        recs.offers(p, list -> {
+            rentLoading = false;
+            if (!running || zone != Z_CARDS || sheetOpen || drawerOpen || menuOpen) return;   // the person moved on
+            if (list == null || list.isEmpty()) {
+                if (p.pkg != null) openRentalApp(p);
+                else showToast(Ui.tr("No prices found for this movie."));
+                return;
+            }
+            showRentMenu(p, list);
+        });
+    }
+
+    private void openRentalApp(Recs.Pick p) {
+        if (p.pkg == null) {
+            showToast(Ui.tr("None of its stores has an app on this TV."));
+            return;
+        }
+        HomeApps.Item it = HomeApps.app(p.pkg, Recs.serviceName(p), p.link);
+        RectF r = cardRects[cardIndex];
+        if (!HomeApps.open(activity, it, this, Math.round(r.left), Math.round(r.top), Math.round(r.width()), Math.round(r.height()))) {
+            showToast(Ui.trf("Couldn't open {app}.", "app", it.label));
+        }
+    }
+
+    private void showRentMenu(Recs.Pick p, List<Recs.Offer> offers) {
+        if (menuOpen || menuTitlePaint == null) return;
+        if (offers.size() > 7) offers = offers.subList(0, 7);   // the panel fits the screen
+        rentMenu = true;
+        rentPick = p;
+        rentOffers = offers;
+        menuItem = null;
+        menuWidth = RENT_MENU_W;
+        float width = (menuWidth - 2 * MENU_PAD) * k, row = (menuWidth - 2 * MENU_INSET - 56) * k;
+        menuTitle = TextUtils.ellipsize(p.title, new TextPaint(menuTitlePaint), width, TextUtils.TruncateAt.END).toString();
+        menuSub = Ui.tr("Rent or buy");
+        menuOptions = new String[offers.size() + 1];
+        menuRight = new String[offers.size() + 1];
+        TextPaint fit = new TextPaint(menuOptionPaint);
+        for (int i = 0; i < offers.size(); i++) {
+            Recs.Offer o = offers.get(i);
+            menuRight[i] = o.prices;
+            String label = o.buy ? Ui.trf("Buy on {store}", "store", o.store) : Ui.trf("Rent on {store}", "store", o.store);
+            float room = Math.max(0, row - fit.measureText(o.prices) - 32 * k);
+            menuOptions[i] = TextUtils.ellipsize(label, fit, room, TextUtils.TruncateAt.END).toString();
+        }
+        menuOptions[offers.size()] = Ui.tr("Cancel");
+        menuRight[offers.size()] = "";
+        layoutMenu();
+        menuOpen = true;
+        menuIndex = 0;
+        menuPick.snap(0);
+        menu.target = 1;
+        menuLayer.setVisibility(VISIBLE);
+        menuLayer.invalidate();
+        wake();
+        spoken.focusMoved();
+    }
+
+    /** The chosen offer opens its store's app on the movie's page (Watchmode's link), else the app's home. */
+    private void pickOffer(int choice) {
+        List<Recs.Offer> offers = rentOffers;
+        if (offers == null || choice >= offers.size()) {
+            click.move();
+            return;
+        }
+        Recs.Offer o = offers.get(choice);
+        click.open();
+        if (o.pkg == null) {
+            showToast(Ui.trf("{store} has no app on this TV.", "store", o.store));
+            return;
+        }
+        HomeApps.Item it = HomeApps.app(o.pkg, o.store, o.url);
+        if (!HomeApps.open(activity, it, this, w / 2, h / 2, 1, 1)) showToast(Ui.trf("{store} has no app on this TV.", "store", o.store));
     }
 
     private void selectTab(int index) {
@@ -4128,6 +4237,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                     int next = Math.max(0, Math.min(cards.size() - 1, cardIndex + dx));
                     if (next == cardIndex) return true;
                     cardIndex = next;
+                    if (cardIndex >= cards.size() - 2) recs.prefetch(TAB_KIND[tab]);   // personal: the next page, ahead
                 } else if (dy < 0) {
                     zone = Z_TOP;
                     topIndex = tab;     // as on Apple TV: moving up to the tabs focuses the selected tab
