@@ -60,6 +60,7 @@ final class Recs {
         }
         String link;            // opens the title in its app (looked up with Watchmode), or null: the app's home
         boolean detailed;
+        boolean rental;         // personal: from the Rentals tab (to rent or buy), not a streaming pick
         java.io.File photo;     // one of your own photos (Photos): no title, no caption
     }
 
@@ -69,6 +70,10 @@ final class Recs {
     private static final String API = "https://api.tmdb.org/3";
     /** The most cards per tab and hour (Prefs.cards() picks how many, 3 by default); the home screen shows 3 at a time and scrolls. */
     static final int MAX_CARDS = 6;
+    /** Personal: the most cards a tab shows with its extra pages (→ past the last card loads Prefs.cards() more). */
+    static final int MAX_SHOWN = 36;
+    /** Personal: the Rentals tab's kind (new movies to rent or buy in the region). */
+    static final String RENT = "rent";
 
     /** The backdrops: on a 720p UI, TMDB's 1280-wide copy shows the same and is lighter to download and decode. */
     private static final String IMAGES = "https://image.tmdb.org/t/p/" + (Backdrop.W <= 1280 ? "w1280" : "original");
@@ -82,7 +87,7 @@ final class Recs {
     /** Personal: an IMDb rating (OMDb) is asked again after this long. */
     private static final long IMDB_EVERY = 3 * 24 * 3600_000L;
     /** Bump when what is saved for each title changes (the saved list is discarded and fetched again). */
-    private static final int CACHE_VERSION = 9;
+    private static final int CACHE_VERSION = 10;
     private static final int MANHA = 0, TARDE = 1, NOITE = 2;
     /** Service name on TMDB (part of the name, lowercase) → TV app (HomeApps key, package). */
     private static final String[][] SERVICES = {
@@ -186,6 +191,9 @@ final class Recs {
     private final Map<String, Backdrop> images = new LinkedHashMap<>(16, 0.75f, true);   // this hour's, built and ready to draw
     private final java.util.Set<String> pending = new java.util.HashSet<>();
     private volatile List<Pick> picks = new ArrayList<>();
+    private volatile List<Pick> rentals = new ArrayList<>();   // personal: the Rentals tab, in TMDB's popularity order
+    /** Personal: pages shown per tab ("all", "movie", "tv", RENT), set by the home screen; 1 when not there. */
+    private final Map<String, Integer> pages = new java.util.concurrent.ConcurrentHashMap<>();
     private volatile int period = -1;
     private volatile long listAt;
     private volatile boolean fetching;
@@ -200,7 +208,12 @@ final class Recs {
         if (cache.getInt("version", 0) != CACHE_VERSION) cache.edit().clear().putInt("version", CACHE_VERSION).apply();
         try {
             String saved = cache.getString("picks", null);
-            if (saved != null) picks = parse(new JSONArray(saved));
+            if (saved != null) {
+                List<Pick> all = parse(new JSONArray(saved)), streaming = new ArrayList<>(), rent = new ArrayList<>();
+                for (Pick p : all) (p.rental ? rent : streaming).add(p);
+                picks = streaming;
+                rentals = rent;
+            }
             period = cache.getInt("period", -1);
             listAt = cache.getLong("listAt", 0);
             listLanguage = cache.getString("language", cache.getBoolean("english", false) ? "en" : "pt");
@@ -313,14 +326,40 @@ final class Recs {
         return now(null);
     }
 
-    /** This hour's picks, movies only ("movie") or shows only ("tv"); null = both (the home screen tabs). */
+    /** This hour's picks, movies only ("movie"), shows only ("tv"), RENT, or null = both (the home screen tabs). */
     List<Pick> now(String kind) {
+        return now(kind, pages(kind));
+    }
+
+    /** Personal: how many pages the tab shows. */
+    int pages(String kind) {
+        Integer n = pages.get(tabKey(kind));
+        return n == null ? 1 : n;
+    }
+
+    /** Personal: the home screen shows `n` pages of the tab (back to 1 when it opens again); their images come now. */
+    void setPages(String kind, int n) {
+        pages.put(tabKey(kind), Math.max(1, Math.min(n, MAX_SHOWN / Prefs.cards())));
+        refreshIfStale();
+    }
+
+    /** Personal: whether → past the last card would bring more. */
+    boolean hasMore(String kind) {
+        return now(kind, pages(kind) + 1).size() > now(kind).size();
+    }
+
+    private static String tabKey(String kind) {
+        return kind == null ? "all" : kind;
+    }
+
+    private List<Pick> now(String kind, int pageCount) {
         List<Pick> list = new ArrayList<>();
         if (!hasKey(context)) return list;    // no TMDB key: no recommendations
         Map<String, Boolean> have = new HashMap<>();   // one look per app, not per title (this runs every 15 s)
-        for (Pick p : picks) {
-            if ((kind == null || kind.equals(p.kind))
-                    && (!p.detailed || (p.pkg != null && have.computeIfAbsent(p.pkg, this::installed)))) list.add(p);   // app missing or switched off: skip
+        boolean rent = RENT.equals(kind);
+        for (Pick p : rent ? rentals : picks) {
+            if ((kind == null || rent || kind.equals(p.kind))
+                    && (!p.detailed || p.rental || (p.pkg != null && have.computeIfAbsent(p.pkg, this::installed)))) list.add(p);   // app missing or switched off: skip
         }
         if (list.isEmpty()) return list;
         // The most popular Prefs.cards() (the list is in TMDB's order), never two from the same franchise ("Law & Order"
@@ -337,7 +376,15 @@ final class Recs {
                 plex |= p.id < 0;
             }
         }
-        return steady(kind == null ? "all" : kind, list, top, cards);
+        List<Pick> shown = steady(tabKey(kind), list, top, cards);
+        // Extra pages: the next most popular titles after the steady first page.
+        java.util.Set<String> used = new java.util.HashSet<>();
+        for (Pick s : shown) used.add(franchise(s.title));
+        for (Pick p : list) {
+            if (shown.size() >= Math.min(MAX_SHOWN, cards * pageCount)) break;
+            if (!shown.contains(p) && p.id >= 0 && used.add(franchise(p.title))) shown.add(p);
+        }
+        return shown;
     }
 
     /**
@@ -401,6 +448,10 @@ final class Recs {
 
     /** Name of the service the pick is on ("Netflix"), or empty. */
     static String serviceName(Pick p) {
+        if (p != null && p.rental) {
+            for (String[] s : STORES) if (s[2].equals(p.pkg)) return s[1];
+            return "";
+        }
         return p == null || p.app == null ? "" : SERVICE_NAME.get(p.app);
     }
 
@@ -457,7 +508,7 @@ final class Recs {
                     tried++;
                     try {
                         if (!pick.detailed) fetchDetails(pick);
-                        if (pick.pkg != null) download(pick);
+                        if (pick.pkg != null || pick.rental) download(pick);
                     } catch (Exception e) {
                         failures++;
                         last = e.getMessage() == null ? e.toString() : e.getMessage();
@@ -532,7 +583,7 @@ final class Recs {
                 for (Pick p : todo) {
                     try {
                         if (!p.detailed) fetchDetails(p);
-                        if (p.pkg != null) download(p);
+                        if (p.pkg != null || p.rental) download(p);
                     } catch (Exception e) {
                         failures++;
                         last = e.getMessage() == null ? e.toString() : e.getMessage();
@@ -555,7 +606,7 @@ final class Recs {
     List<Pick> wanted() {
         List<Pick> out = new ArrayList<>();
         java.util.Set<String> seen = new java.util.HashSet<>();
-        for (String kind : new String[] {null, "movie", "tv"}) {
+        for (String kind : new String[] {null, "movie", "tv", RENT}) {
             for (Pick p : now(kind)) if (seen.add(key(p))) out.add(p);
         }
         return out;
@@ -563,7 +614,7 @@ final class Recs {
 
     /** Movies and shows are numbered separately on TMDB: a pick is identified by type + number. */
     static String key(Pick p) {
-        return p.kind + ":" + p.id;
+        return (p.rental ? "rent:" : p.kind + ":") + p.id;
     }
 
     private void notifyListeners() {
@@ -629,12 +680,28 @@ final class Recs {
         } else if (!Config.PLEX_URL.trim().isEmpty()) {
             AppLog.w("plex: plex_url must be an https://….plex.direct address (and plex_token set): ignored");
         }
-        // Trending first, then the new releases; movies and shows alternating, without repeats, up to 24.
+        // Trending first, then the new releases; movies and shows alternating, without repeats, up to MAX_SHOWN.
         List<Pick> list = new ArrayList<>();
         java.util.Set<String> seen = new java.util.HashSet<>();
-        alternate(list, seen, hotMovies, hotShows, 24);
-        alternate(list, seen, newMovies, newShows, 24);
+        alternate(list, seen, hotMovies, hotShows, MAX_SHOWN);
+        alternate(list, seen, newMovies, newShows, MAX_SHOWN);
         if (list.isEmpty()) throw new IOException("TMDB returned no recommendations");
+        // Personal: the Rentals tab, movies of the past 6 months to rent or buy in the region, the most popular first.
+        // A failure here leaves the streaming picks alone.
+        try {
+            List<Pick> rent = new ArrayList<>();
+            for (int page = 1; page <= 2; page++) {
+                JSONArray found = get("/discover/movie?primary_release_date.gte=" + day(-180) + "&primary_release_date.lte=" + day(0)
+                        + "&language=" + lang() + "&watch_region=" + REGION + "&with_watch_monetization_types=rent%7Cbuy"
+                        + "&include_adult=false&sort_by=popularity.desc" + (Config.HIDE_ANIMATION ? "&without_genres=" + ANIMATION : "")
+                        + "&page=" + page).getJSONArray("results");
+                for (int i = 0; i < found.length(); i++) add(rent, found.getJSONObject(i), "movie");
+            }
+            for (Pick r : rent) r.rental = true;
+            rentals = rent;
+        } catch (Exception e) {
+            AppLog.w("rentals: " + e.getClass().getSimpleName());
+        }
         picks = list;
         period = p;
         listAt = System.currentTimeMillis();
@@ -761,9 +828,58 @@ final class Recs {
                 p.pkg = s[2];
             }
         }
+        if (p.rental) {
+            p.app = null;
+            p.pkg = null;
+            p.link = null;
+            List<String> stores = rentalStores(br, p);
+            if (!stores.isEmpty()) parts.add(Ui.tr("Rent or buy") + ": " + String.join(", ", stores));
+        }
         if (p.app != null) parts.add(SERVICE_NAME.get(p.app));
         p.meta = String.join(" · ", parts);
         p.detailed = true;
+    }
+
+    /** Personal: TV apps that sell or rent movies, in the order OK opens them (TMDB's store name → package). */
+    private static final String[][] STORES = {
+        {"Amazon Video", "Prime Video", "com.amazon.amazonvideo.livingroom"},
+        {"YouTube", "YouTube", "com.google.android.youtube.tv"},
+        {"Claro video", "Claro", "br.com.claro.now.smarttvclient"},
+        {"Apple TV", "Apple TV", "com.apple.atve.androidtv.appletv"},
+        {"Apple iTunes", "Apple TV", "com.apple.atve.androidtv.appletv"},
+        {"Google Play Movies", "Google", "com.google.android.apps.tv.launcherx"},
+    };
+
+    /**
+     * Personal: the stores a rental is in (short names, for the details line), and the first one with its app on the
+     * TV becomes the card's app (YouTube opens on a search for the title). Google's store lives in Google TV's own home
+     * screen, which Free My TV mode turns off.
+     */
+    private List<String> rentalStores(JSONObject region, Pick p) throws org.json.JSONException {
+        List<String> names = new ArrayList<>();
+        java.util.Set<String> offered = new java.util.HashSet<>();
+        for (String type : new String[] {"rent", "buy"}) {
+            JSONArray offers = region == null ? null : region.optJSONArray(type);
+            for (int i = 0; offers != null && i < offers.length(); i++) {
+                String name = offers.getJSONObject(i).optString("provider_name");
+                String shortName = name;
+                for (String[] s : STORES) if (s[0].equalsIgnoreCase(name)) shortName = s[1];
+                if (!names.contains(shortName)) names.add(shortName);
+                offered.add(name.toLowerCase(Locale.ROOT));
+            }
+        }
+        for (String[] s : STORES) {
+            if (!offered.contains(s[0].toLowerCase(Locale.ROOT)) || !installed(s[2])) continue;
+            p.pkg = s[2];
+            if (s[1].equals("YouTube")) {
+                try {
+                    p.link = "https://www.youtube.com/results?search_query=" + URLEncoder.encode(p.title, "UTF-8");
+                } catch (java.io.UnsupportedEncodingException ignored) {
+                }
+            }
+            break;
+        }
+        return names;
     }
 
     /**
@@ -1215,11 +1331,13 @@ final class Recs {
     private void save() {
         try {
             JSONArray a = new JSONArray();
-            for (Pick p : picks) {
+            List<Pick> all = new ArrayList<>(picks);
+            all.addAll(rentals);
+            for (Pick p : all) {
                 a.put(new JSONObject().put("id", p.id).put("kind", p.kind).put("title", p.title).put("backdrop", p.backdrop)
                         .put("poster", p.poster == null ? "" : p.poster).put("link", p.link == null ? "" : p.link)
                         .put("meta", p.meta).put("rating", p.rating == null ? "" : p.rating).put("app", p.app == null ? "" : p.app).put("pkg", p.pkg == null ? "" : p.pkg)
-                        .put("detailed", p.detailed));
+                        .put("detailed", p.detailed).put("rental", p.rental));
             }
             SharedPreferences.Editor e = cache.edit().putString("picks", a.toString()).putInt("period", period).putLong("listAt", listAt)
                     .putString("language", listLanguage)
@@ -1260,6 +1378,7 @@ final class Recs {
             p.app = o.optString("app").isEmpty() ? null : o.optString("app");
             p.pkg = o.optString("pkg").isEmpty() ? null : o.optString("pkg");
             p.detailed = o.optBoolean("detailed");
+            p.rental = o.optBoolean("rental");
             out.add(p);
         }
         return out;
