@@ -4005,17 +4005,18 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         }
         // The cards peeking in at the sides show only their image: their text would start off screen.
         if (p == null || base.left < 0 || base.left > (CONTENT_R - 100) * k) return;
-        // Personal: the rating beside the title, the title shortened to leave it room.
-        float ratingW = p.rating == null ? 0 : lCardMeta.measureText(p.rating) + 16 * k;
+        // Personal: the rating beside the title when the whole title fits with it; else first on the details line.
+        float titleW = lCardTitle.measureText(p.title == null ? "" : p.title);
+        boolean beside = p.rating != null && titleW + 16 * k + lCardMeta.measureText(p.rating) <= bw;
         fitPaint.set(lCardTitle);
-        String title = TextUtils.ellipsize(p.title, fitPaint, Math.max(0, bw - ratingW), TextUtils.TruncateAt.END).toString();
-        c.drawText(title, base.left, base.bottom + 46 * k, lCardTitle);
-        if (p.rating != null) c.drawText(p.rating, base.left + lCardTitle.measureText(title) + 16 * k, base.bottom + 46 * k, lCardMeta);
-        if (open > 0.02f && p.meta != null && !p.meta.isEmpty()) {
+        c.drawText(TextUtils.ellipsize(p.title, fitPaint, bw, TextUtils.TruncateAt.END).toString(), base.left, base.bottom + 46 * k, lCardTitle);
+        if (beside) c.drawText(p.rating, base.left + titleW + 16 * k, base.bottom + 46 * k, lCardMeta);
+        String meta = beside ? p.meta : p.metaWithRating();
+        if (open > 0.02f && meta != null && !meta.isEmpty()) {
             fitPaint.set(lCardMeta);
             int a = lCardMeta.getAlpha();
             lCardMeta.setAlpha(Math.round(a * open));
-            c.drawText(TextUtils.ellipsize(p.meta, fitPaint, bw, TextUtils.TruncateAt.END).toString(), base.left, base.bottom + 80 * k, lCardMeta);
+            c.drawText(TextUtils.ellipsize(meta, fitPaint, bw, TextUtils.TruncateAt.END).toString(), base.left, base.bottom + 80 * k, lCardMeta);
             lCardMeta.setAlpha(a);
         }
     }
