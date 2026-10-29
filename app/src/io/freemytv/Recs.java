@@ -51,6 +51,13 @@ final class Recs {
         int id;
         String kind;            // "movie" or "tv"
         String title, backdrop, poster, meta = "", app, pkg;   // poster: the portrait image of the narrow cards
+        String rating;          // personal: "IMDb 7,8" or "TMDB 7,4", or null; drawn beside the title
+
+        /** The details line with the rating first, for places that show no rating beside the title. */
+        String metaWithRating() {
+            if (rating == null) return meta;
+            return meta == null || meta.isEmpty() ? rating : rating + " · " + meta;
+        }
         String link;            // opens the title in its app (looked up with Watchmode), or null: the app's home
         boolean detailed;
         java.io.File photo;     // one of your own photos (Photos): no title, no caption
@@ -68,9 +75,14 @@ final class Recs {
     private static final String POSTERS = "https://image.tmdb.org/t/p/w500";
     /** TMDB's Animation genre (movies and shows: cartoons and anime), left out with hide_animation=true. */
     private static final int ANIMATION = 16;
-    private static final long LIST_EVERY = 6 * 3600_000L;
+    /** Personal: every hour, so the cards follow TMDB's popularity a little at a time (see steady()). */
+    private static final long LIST_EVERY = 3600_000L;
+    /** Personal: at most this many cards per tab give way to more popular titles at each new list. */
+    private static final int SWAPS_PER_LIST = 2;
+    /** Personal: an IMDb rating (OMDb) is asked again after this long. */
+    private static final long IMDB_EVERY = 3 * 24 * 3600_000L;
     /** Bump when what is saved for each title changes (the saved list is discarded and fetched again). */
-    private static final int CACHE_VERSION = 5;
+    private static final int CACHE_VERSION = 9;
     private static final int MANHA = 0, TARDE = 1, NOITE = 2;
     /** Service name on TMDB (part of the name, lowercase) → TV app (HomeApps key, package). */
     private static final String[][] SERVICES = {
@@ -311,21 +323,72 @@ final class Recs {
                     && (!p.detailed || (p.pkg != null && have.computeIfAbsent(p.pkg, this::installed)))) list.add(p);   // app missing or switched off: skip
         }
         if (list.isEmpty()) return list;
-        long hour = System.currentTimeMillis() / 3600_000L;
-        // Prefs.cards() per hour, never two from the same franchise ("Law & Order" and "Law & Order: Special…").
-        List<Pick> out = new ArrayList<>();
+        // The most popular Prefs.cards() (the list is in TMDB's order), never two from the same franchise ("Law & Order"
+        // and "Law & Order: Special…").
+        List<Pick> top = new ArrayList<>();
         java.util.Set<String> seen = new java.util.HashSet<>();
         int cards = Prefs.cards();
         boolean plex = false;
-        for (int i = 0; i < list.size() && out.size() < cards; i++) {
-            Pick p = list.get((int) ((hour * cards + i) % list.size()));
+        for (int i = 0; i < list.size() && top.size() < cards; i++) {
+            Pick p = list.get(i);
             if (p.id < 0 && plex) continue;   // a Plex title is the surprise: one per tab, not the movie and the show together
             if (seen.add(franchise(p.title))) {
-                out.add(p);
+                top.add(p);
                 plex |= p.id < 0;
             }
         }
-        return out;
+        return steady(kind == null ? "all" : kind, list, top, cards);
+    }
+
+    /**
+     * Personal: the cards change slowly. A title that left the list (or whose app is gone) goes right away; otherwise,
+     * at each new list, at most SWAPS_PER_LIST of the least popular cards give way to more popular titles.
+     */
+    private List<Pick> steady(String tab, List<Pick> list, List<Pick> top, int cards) {
+        Map<String, Integer> rank = new HashMap<>();
+        Map<String, Pick> byKey = new HashMap<>();
+        for (int i = 0; i < list.size(); i++) {
+            rank.putIfAbsent(key(list.get(i)), i);
+            byKey.putIfAbsent(key(list.get(i)), list.get(i));
+        }
+        List<Pick> shown = new ArrayList<>();
+        java.util.Set<String> franchises = new java.util.HashSet<>();
+        for (String k : cache.getString("shown:" + tab, "").split(",")) {
+            Pick p = byKey.get(k);
+            if (p != null && shown.size() < cards && franchises.add(franchise(p.title))) shown.add(p);
+        }
+        boolean newList = cache.getLong("shownList:" + tab, -1) != listAt;
+        int swaps = newList ? SWAPS_PER_LIST : 0;
+        boolean changed = false;
+        for (Pick p : top) {
+            if (shown.contains(p)) continue;
+            if (shown.size() < cards) {   // an empty place is filled at once
+                if (franchises.add(franchise(p.title))) {
+                    shown.add(p);
+                    changed = true;
+                }
+                continue;
+            }
+            if (swaps == 0) break;
+            Pick worst = shown.get(0);
+            for (Pick s : shown) if (rank.get(key(s)) > rank.get(key(worst))) worst = s;
+            if (rank.get(key(worst)) <= rank.get(key(p))) break;   // `top` is in order: nothing after p is more popular
+            franchises.remove(franchise(worst.title));
+            if (!franchises.add(franchise(p.title))) {
+                franchises.add(franchise(worst.title));
+                continue;
+            }
+            shown.set(shown.indexOf(worst), p);
+            swaps--;
+            changed = true;
+        }
+        shown.sort((a, b) -> rank.get(key(a)) - rank.get(key(b)));   // the most popular is the featured one
+        if (changed || newList) {
+            StringBuilder keys = new StringBuilder();
+            for (Pick p : shown) keys.append(keys.length() == 0 ? "" : ",").append(key(p));
+            cache.edit().putString("shown:" + tab, keys.toString()).putLong("shownList:" + tab, listAt).apply();
+        }
+        return shown;
     }
 
     /** "Law & Order: Special Victims Unit" → "law & order" (what comes before ":" or " - "). */
@@ -664,13 +727,22 @@ final class Recs {
     /** Genre, runtime (or seasons) and the service it's on, among the ones the TV has. */
     private void fetchDetails(Pick p) throws Exception {
         JSONObject o = get("/" + p.kind + "/" + p.id
-                + "?language=" + lang() + "&append_to_response=watch/providers,images&include_image_language=null," + Ui.language.replaceAll("-.*", "") + ",en");
+                + "?language=" + lang() + "&append_to_response=watch/providers,images,external_ids&include_image_language=null," + Ui.language.replaceAll("-.*", "") + ",en");
         p.title = title(p, o);
         String poster = o.optString("poster_path", "");
         if (!poster.isEmpty() && !"null".equals(poster)) p.poster = poster;
         String best = bestBackdrop(o.optJSONObject("images"));
         if (best != null) p.backdrop = best;
         List<String> parts = new ArrayList<>();
+        JSONObject ids = o.optJSONObject("external_ids");
+        String rating = imdbRating(ids != null ? ids.optString("imdb_id") : o.optString("imdb_id"));
+        p.rating = null;
+        if (rating != null) {
+            p.rating = "IMDb " + rating;
+        } else if (!Config.OMDB_KEY.trim().isEmpty() && o.optInt("vote_count") >= 50) {
+            // OMDb has no rating yet for the newest titles: TMDB's own, said as such.
+            p.rating = "TMDB " + String.format(Ui.locale(), "%.1f", o.optDouble("vote_average"));
+        }
         JSONArray genres = o.optJSONArray("genres");
         if (p.kind.equals("tv")) parts.add(Ui.tr("Series"));
         if (genres != null && genres.length() > 0) {
@@ -861,6 +933,49 @@ final class Recs {
         } finally {
             c.disconnect();
         }
+    }
+
+    // MARK: - OMDb (personal: config.properties "omdb_key")
+
+    /** The title's IMDb rating ("7,8" in the TV's language), or null: no key, no rating, or OMDb didn't answer. */
+    private String imdbRating(String imdbId) {
+        String key = Config.OMDB_KEY.trim();
+        if (key.isEmpty() || imdbId == null || !imdbId.matches("tt\\d+")) return null;
+        long now = System.currentTimeMillis();
+        String rating = null;
+        String cached = cache.getString("imdb:" + imdbId, null);   // "<when>|<rating>", rating empty when IMDb has none
+        int bar = cached == null ? -1 : cached.indexOf('|');
+        try {
+            if (bar > 0 && now - Long.parseLong(cached.substring(0, bar)) < IMDB_EVERY) rating = cached.substring(bar + 1);
+        } catch (NumberFormatException ignored) {
+        }
+        if (rating == null) {
+            try {
+                HttpURLConnection c = (HttpURLConnection) new URL("https://www.omdbapi.com/?i=" + imdbId
+                        + "&apikey=" + URLEncoder.encode(key, "UTF-8")).openConnection();
+                c.setConnectTimeout(8000);
+                c.setReadTimeout(8000);
+                try {
+                    if (c.getResponseCode() != 200) throw new IOException("OMDb returned HTTP " + c.getResponseCode());
+                    JSONObject answer = new JSONObject(read(c.getInputStream()));
+                    if (!answer.optBoolean("Response", true) || answer.has("Error")) {
+                        // "Error getting data." and the daily limit pass: ask again with the next list, don't remember it.
+                        AppLog.w("omdb " + imdbId + ": " + answer.optString("Error"));
+                        return null;
+                    }
+                    String r = answer.optString("imdbRating");
+                    rating = r.matches("\\d+(\\.\\d)?") ? r : "";   // "N/A": IMDb has none yet
+                } finally {
+                    c.disconnect();
+                }
+            } catch (Exception e) {
+                AppLog.w("omdb: " + e.getClass().getSimpleName());   // never the message: it can carry the URL and key
+                return null;
+            }
+            cache.edit().putString("imdb:" + imdbId, now + "|" + rating).apply();
+        }
+        if (rating.isEmpty()) return null;
+        return rating.replace('.', java.text.DecimalFormatSymbols.getInstance(Ui.locale()).getDecimalSeparator());
     }
 
     private JSONObject get(String path) throws IOException, org.json.JSONException {
@@ -1103,7 +1218,7 @@ final class Recs {
             for (Pick p : picks) {
                 a.put(new JSONObject().put("id", p.id).put("kind", p.kind).put("title", p.title).put("backdrop", p.backdrop)
                         .put("poster", p.poster == null ? "" : p.poster).put("link", p.link == null ? "" : p.link)
-                        .put("meta", p.meta).put("app", p.app == null ? "" : p.app).put("pkg", p.pkg == null ? "" : p.pkg)
+                        .put("meta", p.meta).put("rating", p.rating == null ? "" : p.rating).put("app", p.app == null ? "" : p.app).put("pkg", p.pkg == null ? "" : p.pkg)
                         .put("detailed", p.detailed));
             }
             SharedPreferences.Editor e = cache.edit().putString("picks", a.toString()).putInt("period", period).putLong("listAt", listAt)
@@ -1113,6 +1228,16 @@ final class Recs {
             Set<String> keep = new HashSet<>();
             for (Pick p : picks) keep.add(linkKey(p));
             for (String k : cache.getAll().keySet()) if ((k.startsWith("wm:") || k.startsWith("wm2:")) && !k.equals("wm:refused") && !keep.contains(k)) e.remove(k);
+            // IMDb ratings older than twice their life go (a title back in the list asks again).
+            for (Map.Entry<String, ?> en : cache.getAll().entrySet()) {
+                if (!en.getKey().startsWith("imdb:")) continue;
+                String v = String.valueOf(en.getValue());
+                try {
+                    if (System.currentTimeMillis() - Long.parseLong(v.substring(0, v.indexOf('|'))) > 2 * IMDB_EVERY) e.remove(en.getKey());
+                } catch (RuntimeException bad) {
+                    e.remove(en.getKey());
+                }
+            }
             e.apply();
         } catch (Exception ignored) {
         }
@@ -1131,6 +1256,7 @@ final class Recs {
             p.poster = o.optString("poster");
             p.link = o.optString("link").isEmpty() ? null : o.optString("link");
             p.meta = o.optString("meta");
+            p.rating = o.optString("rating").isEmpty() ? null : o.optString("rating");
             p.app = o.optString("app").isEmpty() ? null : o.optString("app");
             p.pkg = o.optString("pkg").isEmpty() ? null : o.optString("pkg");
             p.detailed = o.optBoolean("detailed");

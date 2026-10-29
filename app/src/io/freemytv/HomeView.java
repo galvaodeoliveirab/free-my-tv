@@ -986,7 +986,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         }
         h.label = Recs.periodLabel();
         h.title = p.title == null ? "" : p.title;
-        h.meta = p.meta == null ? "" : p.meta;
+        h.meta = p.metaWithRating() == null ? "" : p.metaWithRating();
         h.button = p.pkg != null;
         h.dots = picks.size();
         h.dot = pickIndex;
@@ -3180,7 +3180,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private static String pickText(Recs.Pick p) {
         if (p == null) return "";
         StringBuilder s = new StringBuilder(p.title == null ? "" : p.title);
-        if (p.meta != null && !p.meta.isEmpty()) s.append(", ").append(p.meta);
+        String meta = p.metaWithRating();
+        if (meta != null && !meta.isEmpty()) s.append(", ").append(meta);
         String app = Recs.serviceName(p);
         if (app != null && !app.isEmpty()) s.append(". App: ").append(app);
         return s.toString();
@@ -4004,8 +4005,12 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         }
         // The cards peeking in at the sides show only their image: their text would start off screen.
         if (p == null || base.left < 0 || base.left > (CONTENT_R - 100) * k) return;
+        // Personal: the rating beside the title, the title shortened to leave it room.
+        float ratingW = p.rating == null ? 0 : lCardMeta.measureText(p.rating) + 16 * k;
         fitPaint.set(lCardTitle);
-        c.drawText(TextUtils.ellipsize(p.title, fitPaint, bw, TextUtils.TruncateAt.END).toString(), base.left, base.bottom + 46 * k, lCardTitle);
+        String title = TextUtils.ellipsize(p.title, fitPaint, Math.max(0, bw - ratingW), TextUtils.TruncateAt.END).toString();
+        c.drawText(title, base.left, base.bottom + 46 * k, lCardTitle);
+        if (p.rating != null) c.drawText(p.rating, base.left + lCardTitle.measureText(title) + 16 * k, base.bottom + 46 * k, lCardMeta);
         if (open > 0.02f && p.meta != null && !p.meta.isEmpty()) {
             fitPaint.set(lCardMeta);
             int a = lCardMeta.getAlpha();

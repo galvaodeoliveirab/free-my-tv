@@ -747,7 +747,8 @@ final class DreamView extends View implements Choreographer.FrameCallback, HomeD
             c.translate(x - Ui.leftBearing(titlePaint, title), originY);
             t.draw(c);
             c.restore();
-            if (s.pick.meta != null && !s.pick.meta.isEmpty()) c.drawText(s.pick.meta, x, metaBase, metaPaint);
+            String meta = s.pick.metaWithRating();
+            if (meta != null && !meta.isEmpty()) c.drawText(meta, x, metaBase, metaPaint);
             if (hint) {
                 c.drawText(Ui.trf("Press OK to watch on {app} · any other button to close", "app", Recs.serviceName(s.pick)),
                         x, META_BASE * k, hintPaint);
