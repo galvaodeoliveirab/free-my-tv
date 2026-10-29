@@ -188,6 +188,8 @@ final class Recs {
     /** Personal: the next page's details and images, three at a time, ahead of → past the last card. */
     private final ExecutorService ahead = Executors.newFixedThreadPool(3);
     private final java.util.Set<String> aheadKeys = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    /** Personal: cards are built (decoded and blurred, about a second each on a TV) two at a time, apart from the fetches. */
+    private final ExecutorService build = Executors.newFixedThreadPool(2);
     private final Handler main = new Handler(Looper.getMainLooper());
     private final List<Listener> listeners = new ArrayList<>();
     private final Map<String, Poster> posters = new LinkedHashMap<>();   // narrow-card portraits, same keys as images
@@ -360,7 +362,10 @@ final class Recs {
             ahead.execute(() -> {
                 try {
                     if (!p.detailed) fetchDetails(p);
-                    if (p.pkg != null || p.rental) download(p);
+                    if (p.pkg != null || p.rental) {
+                        download(p);
+                        backdrop(p);   // built too, so the page shows at once
+                    }
                 } catch (Exception e) {
                     AppLog.w("prefetch: " + e.getClass().getSimpleName());
                 } finally {
@@ -491,7 +496,7 @@ final class Recs {
             if (b != null) return b;
             if (!pending.add(key)) return null;
         }
-        io.execute(() -> {
+        build.execute(() -> {
             try {
                 loadImage(p);
             } finally {
@@ -1381,7 +1386,8 @@ final class Recs {
     private void fetchFile(File f, HttpURLConnection c) throws IOException {
         //noinspection ResultOfMethodCallIgnored
         f.getParentFile().mkdirs();
-        File part = new File(f.getPath() + ".part");
+        // Personal: one part file per thread, as a prefetch and a card being built may fetch the same image.
+        File part = new File(f.getPath() + "." + Thread.currentThread().getId() + ".part");
         c.setConnectTimeout(8000);
         c.setReadTimeout(20000);
         try (InputStream in = c.getInputStream(); FileOutputStream out = new FileOutputStream(part)) {
@@ -1423,7 +1429,7 @@ final class Recs {
             synchronized (images) {
                 images.put(p.backdrop, backdrop);
                 if (poster != null) posters.put(p.backdrop, poster);
-                while (images.size() > (forLight ? Prefs.cards() + 7 : 4)) images.remove(images.keySet().iterator().next());
+                while (images.size() > (forLight ? keep() : 4)) images.remove(images.keySet().iterator().next());
                 posters.keySet().retainAll(images.keySet());
             }
             notifyListeners();
@@ -1432,6 +1438,16 @@ final class Recs {
             f.delete();
             AppLog.w("recommendation image: " + e.getMessage());
         }
+    }
+
+    /**
+     * Personal: cards kept built (about 4 MB each): the tab's pages and the next one, plus the 3 the home screen keeps of
+     * each other tab. Fewer made them build again and again, evicting each other.
+     */
+    private int keep() {
+        int most = 1;
+        for (int n : pages.values()) most = Math.max(most, n);
+        return Math.max(Prefs.cards() + 7, Prefs.cards() * (most + 1) + 3 * 3 + 4);
     }
 
     /** The poster at the narrow card's size, or null (not downloaded yet or unreadable). */
@@ -1467,6 +1483,8 @@ final class Recs {
         }
     }
 
+    private static final int KEEP_FILES = 160;
+
     private static void prune(File dir) {
         // A download cut off when the system stopped the app leaves its .part behind.
         long stale = System.currentTimeMillis() - 10 * 60_000L;
@@ -1475,10 +1493,11 @@ final class Recs {
             //noinspection ResultOfMethodCallIgnored
             if (parts[i].lastModified() < stale) parts[i].delete();
         }
+        // Personal: 160, not 60: four tabs with extra pages hold far more than 30 titles (a backdrop and a poster each).
         File[] files = dir.listFiles((d, name) -> !name.endsWith(".part"));
-        if (files == null || files.length <= 60) return;
+        if (files == null || files.length <= KEEP_FILES) return;
         Arrays.sort(files, (a, b) -> Long.compare(a.lastModified(), b.lastModified()));
-        for (int i = 0; i < files.length - 60; i++) {
+        for (int i = 0; i < files.length - KEEP_FILES; i++) {
             //noinspection ResultOfMethodCallIgnored
             files[i].delete();
         }

@@ -4237,7 +4237,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                     int next = Math.max(0, Math.min(cards.size() - 1, cardIndex + dx));
                     if (next == cardIndex) return true;
                     cardIndex = next;
-                    if (cardIndex >= cards.size() - 2) recs.prefetch(TAB_KIND[tab]);   // personal: the next page, ahead
+                    if (cardIndex >= cards.size() - 4) recs.prefetch(TAB_KIND[tab]);   // personal: the next page, ahead
                 } else if (dy < 0) {
                     zone = Z_TOP;
                     topIndex = tab;     // as on Apple TV: moving up to the tabs focuses the selected tab
