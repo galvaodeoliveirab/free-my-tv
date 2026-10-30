@@ -77,7 +77,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     // padding (the focused icon grows 20% without touching its edge). The icons are 16:9, the shape of the apps' TV
     // banners, so those are never stretched: up to 224 × 126, 178 × 100 with eight apps, 133 × 75 with ten
     // (HomeApps.shelfVisible; past that the shelf scrolls).
-    private static final float SHELF_PAD = 40, TILE_GAP = 48;
+    private static final float SHELF_PAD = 40, TILE_GAP = 40;   // personal: the cards' gap (L_CARD_GAP), one rhythm
     private static final float TILE_RADIUS = 22;
     // Tile focus (Apple TV style): it grows from the center and its shadow drops (it "rises" toward the viewer).
     private static final float FOCUS_GROW = 0.2f;
@@ -474,7 +474,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         }
         for (int i = 0; i < Recs.MAX_SHOWN; i++) {
             cardFocus[i] = new Spring(0.32f, 0.78f, 0);
-            cardOpen[i] = new Spring(0.32f, 0.78f, i == 0 ? 1 : 0);
+            cardOpen[i] = new Spring(0.32f, 0.78f, 0);
             cardRects[i] = new RectF();
         }
         for (int i = 0; i < watchFocus.length; i++) watchFocus[i] = new Spring(0.32f, 0.78f, 0);
@@ -1423,10 +1423,12 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private void layoutShelf() {
         int n = Math.min(shelf.size(), shelfVisible);
         float pad = SHELF_PAD * k, gap = TILE_GAP * k;
-        float full = (CONTENT_R - MARGIN) * k;
+        // Personal: the glass, not the tiles, sits on the margins (MARGIN to CONTENT_R) like the title, tabs and cards;
+        // the tiles keep its padding inside, room enough for the focused one to grow without crossing them.
+        float full = (CONTENT_R - MARGIN) * k - 2 * pad;
         // Tiles in the TV banners' own 16:9, so an app's art is never stretched; never taller than L_TILE_H. The glass
         // keeps its bottom edge, so with more apps it only gets lower. A full shelf (personal: 6 bigger apps) spans the
-        // content's width instead, lined up with the picks above.
+        // content's width instead.
         float fill = (full - Math.max(0, n - 1) * gap) / Math.max(1, n);
         float tw = n >= shelfVisible ? fill : Math.min(L_TILE_H * 16f / 9 * k, fill);
         float th = tw * 9f / 16;
@@ -2154,7 +2156,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (snap) heroFocus.snap(heroFocus.target);
         boolean topChanged = aim(topFocus, !sheetOpen && zone == Z_TOP ? topIndex : -1, snap);
         heroChanged |= aim(cardFocus, !sheetOpen && zone == Z_CARDS ? cardIndex : -1, snap) | topChanged;
-        heroChanged |= aim(cardOpen, cardIndex, snap);
+        // Personal: a card opens only while it has the focus; with the focus elsewhere the row is all posters.
+        heroChanged |= aim(cardOpen, zone == Z_CARDS ? cardIndex : -1, snap);
         float scrollTo = Math.max(0, cardIndex - 2);
         heroChanged |= cardScroll.target != scrollTo;
         cardScroll.target = scrollTo;
@@ -3304,7 +3307,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         layoutCards();
     }
 
-    /** The cards side by side: the one at cardIndex wide, the others tall, sliding as `cardOpen` moves. */
+    /** The cards side by side: the focused one wide, the others tall, sliding as `cardOpen` moves. */
     private void layoutCards() {
         float top = L_CARDS_TOP * k, ch = L_CARD_H * k, g = L_CARD_GAP * k, tall = L_TALL_W * k;
         float wide = (CONTENT_R - MARGIN) * k - 2 * tall - 2 * g, x = MARGIN * k - cardScroll.value * (tall + g);
@@ -3902,7 +3905,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         // A tab opens at its first pick, its row at the start: at once, as sliding back would first show the new
         // tab's cards scrolled to where the last tab was.
         cardIndex = 0;
-        aim(cardOpen, 0, true);
+        aim(cardOpen, zone == Z_CARDS ? 0 : -1, true);
         cardScroll.snap(0);
         updateCards();
         heroDirty = true;
@@ -4083,14 +4086,15 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     /**
      * Recommendation card: the title's photo (already at the focused card size, so it stays sharp), rounded corners and
-     * a soft shadow; when focused, it grows 5%, rises and lights up its border. Below it, the title (and on the large
+     * a soft shadow; when focused, it rises and lights up its border (personal: no growing, so the open card keeps to the
+     * margins; its width already marks it). Below it, the title (and on the large
      * card, genre · runtime · service).
      */
     private void drawLightCard(Canvas c, int i) {
         RectF base = cardRects[i];
         if (base.right < 0 || base.left > getWidth()) return;   // slid off screen
         Recs.Pick p = i < cards.size() ? cards.get(i) : null;
-        float v = cardFocus[i].value, f = Ui.clamp(v), s = 1 + 0.05f * v;
+        float v = cardFocus[i].value, f = Ui.clamp(v), s = 1;
         float bw = base.width(), bh = base.height(), r0 = 18 * k;
         float cx = base.centerX(), cy = base.centerY() - 6 * k * v;
         cell.set(cx - bw * s / 2, cy - bh * s / 2, cx + bw * s / 2, cy + bh * s / 2);
