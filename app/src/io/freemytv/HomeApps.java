@@ -117,11 +117,11 @@ final class HomeApps {
         {"spotify", "Spotify", "com.spotify.tv.android", "1DB954", "", "1"},
     };
     /**
-     * Apps the shelf shows at once (it scrolls for the rest): 8, today's smallest tiles (178 wide in HomeView's 1760 of
-     * content), so a shelf of up to 8 looks as it always did. The built-in list keeps 8, and low-memory TVs hold 8 at
-     * most, without scrolling: every app on the shelf keeps its logo in memory, at two sizes.
+     * Apps the shelf shows at once (it scrolls for the rest): 6 (personal: bigger tiles, 224 wide in HomeView's 1760 of
+     * content). Low-memory TVs hold 8 at most, without scrolling: every app on the shelf keeps its logo in memory, at
+     * two sizes.
      */
-    private static final int SHELF_VISIBLE = 8, FEW_APPS = 8;
+    private static final int SHELF_VISIBLE = 6, FEW_APPS = 8;
 
     /** Low memory (TCL's 1 GB models): every MB counts. */
     static boolean lowRam(Context c) {

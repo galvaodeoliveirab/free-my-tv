@@ -1425,8 +1425,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         float pad = SHELF_PAD * k, gap = TILE_GAP * k;
         float full = (CONTENT_R - MARGIN) * k;
         // Tiles in the TV banners' own 16:9, so an app's art is never stretched; never taller than L_TILE_H. The glass
-        // keeps its bottom edge, so with more apps it only gets lower.
-        float tw = Math.min(L_TILE_H * 16f / 9 * k, (full - Math.max(0, n - 1) * gap) / Math.max(1, n));
+        // keeps its bottom edge, so with more apps it only gets lower. A full shelf (personal: 6 bigger apps) spans the
+        // content's width instead, lined up with the picks above.
+        float fill = (full - Math.max(0, n - 1) * gap) / Math.max(1, n);
+        float tw = n >= shelfVisible ? fill : Math.min(L_TILE_H * 16f / 9 * k, fill);
         float th = tw * 9f / 16;
         float width = n * tw + Math.max(0, n - 1) * gap, left = (w - width) / 2f;
         float top = (L_PLATTER_TOP + L_TILE_H) * k - th;
