@@ -38,22 +38,25 @@ import android.view.accessibility.AccessibilityNodeProvider;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.text.SimpleDateFormat;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TimeZone;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Consumer;
 
 /**
  * The home screen, styled after the Apple TV app with the macOS 27 glass:
- *  - at the top left, the "For You" title and the tabs (Explore, Movies, Shows); at the top right, icon-only glass
- *    buttons (Live TV, HDMI Inputs, Settings), with the focused one's name below it, and the small crypto quotes
- *    (logo + price) at the right end of the tab row;
+ *  - at the top left, the "For You" title and the tabs (Explore, Movies, Shows); at the top right, the clock and, on
+ *    the tab row below it, icon-only glass buttons (Live TV, HDMI Inputs, Settings), with the focused one's name at
+ *    their left;
  *  - three cards with the titles recommended for right now in the selected tab (Recs, from TMDB); the background is
  *    the focused card's photo, heavily blurred and almost white (Backdrop); without picks, one of your own photos
  *    (Photos) the same way, or else a light gradient;
@@ -101,9 +104,14 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     // The tab bar is a 68 px capsule; the cards sit on the 5-column grid (the wide one spans 3).
     private static final float L_TITLE_BASE = 130, L_TABBAR_TOP = 158, L_TABBAR_H = 68, L_CARDS_TOP = 262, L_CARD_H = 442;
     private static final float WATCH_GAP = 40;
-    private static final float L_TALL_W = 320, L_CARD_GAP = 40, L_BUTTON = 68, L_BUTTON_GAP = 20, L_BUTTON_CY = 103;
+    private static final float L_TALL_W = 320, L_CARD_GAP = 40, L_BUTTON = 52, L_BUTTON_GAP = 16;
+    // Personal: the buttons on the tab row, as wide together as the clock above them.
+    private static final float L_BUTTON_CY = L_TABBAR_TOP + L_TABBAR_H / 2;
     private static final float L_PLATTER_TOP = 814, L_TILE_H = 126;
     private static final float L_DATE_BASE = 330, L_CLOCK_BASE = 540, L_WEATHER_BASE = 626, L_QUOTES_BASE = 694;
+    /** Personal: the top right clock, always on Porto Alegre's time, whatever zone the TV is set to. */
+    private static final SimpleDateFormat TOP_CLOCK = new SimpleDateFormat("HH:mm", Locale.ROOT);
+    static { TOP_CLOCK.setTimeZone(TimeZone.getTimeZone("America/Sao_Paulo")); }
     private static final int L_INK = 0xFF1D1D1F, L_DIM = 0xFF6E6E73, L_FAINT = 0xFF8E8E93;
     private static String[] tabs;
     private static int tabsGeneration = -1;
@@ -199,7 +207,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private Paint menuTitlePaint, menuSubPaint, menuOptionPaint;
     private final RectF[] cardRects = new RectF[Recs.MAX_SHOWN];
     private final List<HomeApps.Item> lightButtons = new ArrayList<>();
-    private Paint lTitle, lTab, lTabOn, lCardTitle, lCardMeta, lQuote, lTip, lDate, lClock, lWeather, lClockQuote;
+    private Paint lTitle, lTab, lTabOn, lCardTitle, lCardMeta, lQuote, lTip, lDate, lClock, lWeather, lClockQuote, lTopClock;
     private Shader lightGradient;
     // Continue Watching: the background takes the focused card's colour (worked out once per picture, WatchArt), easing
     // from one to the next. Drawn as a plain fill under a fixed shade, so a colour change creates nothing per frame.
@@ -303,7 +311,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private static final long BURST_MS = 1500;
     private int w, h;
     private float k = 1;
-    private String clockText = "", dateText = "", weatherLine = "";
+    private String clockText = "", topClockText = "", dateText = "", weatherLine = "";
     /** "Off in 42 min" next to the round buttons while the sleep timer runs (Settings > Sleep Timer); "" otherwise. */
     private String sleepText = "";
     private long weatherLineAt = -1;
@@ -680,7 +688,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         float kk = width / 1920f;
         measure(sky, width, height);
         measure(heroLayer, width, Math.round(790 * kk));
-        measure(status, Math.round(1160 * kk), Math.round(240 * kk));
+        measure(status, Math.round(1160 * kk), Math.round(300 * kk));   // personal: down to the lower buttons' shadow
         // Sized to what they draw (the glass and its shadow; the grown tiles and their shadows): smaller layers are
         // cheaper for the GPU to composite on every frame of the drawer animation.
         measure(platter, width, Math.round(320 * kk));
@@ -767,6 +775,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         lClock.setLetterSpacing(-0.01f);
         lWeather = Ui.text(Ui.medium, 34 * k, L_DIM);
         lClockQuote = Ui.numbers(Ui.medium, 28 * k, L_DIM);
+        lTopClock = Ui.numbers(Ui.medium, 76 * k, L_INK);
         lightGradient = tintShade = null;
         buttonPaint = Ui.text(Ui.semibold, 29 * k, INK);
         capsuleText = Ui.numbers(Ui.medium, 29 * k, 0xF2FFFFFF);
@@ -969,6 +978,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (minute == clockMinute || clockPaint == null) return false;
         clockMinute = minute;
         clockText = Ui.clock(now);
+        topClockText = TOP_CLOCK.format(now);
         dateText = Ui.date(now);
         return true;
     }
@@ -1216,6 +1226,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         lClock.setColor(tone(L_INK, WHITE));
         lWeather.setColor(tone(L_DIM, 0xFF98989D));
         lClockQuote.setColor(tone(L_DIM, 0xFF98989D));
+        lTopClock.setColor(tone(L_INK, WHITE));
         staleQuote.setColor(tone(L_FAINT, 0x99FFFFFF));
         if (continueMode()) applyWatchContrast();
     }
@@ -1578,8 +1589,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     /** Coin logo + price in the configured currency, in a row at the right end of the tab bar. */
     private void drawQuotes(Canvas c) {
         boolean clock = clockMode();
-        // At the right margin, under the round buttons: the shelf's glass is narrower and centred with few apps.
-        float right = CONTENT_R * k;
+        // Left of the round buttons, in their row: the shelf's glass is narrower and centred with few apps.
+        float right = (lightButtons.isEmpty() ? CONTENT_R * k : topRects[TABS].left - 28 * k);
         applyTone();
         Paint text = clock ? lClockQuote : lQuote;
         // The corner buttons' names appear in this row: the quotes fade out while one of them has focus.
@@ -1599,6 +1610,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             text.setColor(textColor);
             return;
         }
+        // Personal: no coins on the tab row (the clock took the corner); the drawer's card still has them.
+        if (!clock) { text.setColor(textColor); return; }
         // One read of the list, so n always matches the coins drawn below.
         int[] coins = HomeData.active();
         int n = coins.length;
@@ -1609,13 +1622,12 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (q == null || !q.matches(coins, data.prices, text.getTextSize())) {
             q = quotes = new Quotes(coins, data.prices, text);
         }
-        // On the tab row, at the right.
-        float base = clock ? L_QUOTES_BASE * k : (L_TABBAR_TOP + L_TABBAR_H / 2) * k + q.halfCap;
-        float cap = q.cap, gap = (clock ? 8 : 6) * k, spacing = (clock ? 32 : 24) * k;
+        float base = L_QUOTES_BASE * k;
+        float cap = q.cap, gap = 8 * k, spacing = 32 * k;
         float total = spacing * (n - 1);
         for (int i = 0; i < n; i++) total += q.glyphs[i] + gap + q.widths[i];
-        float x = clock ? MARGIN * k : right - total;
-        int coinColor = clock ? text.getColor() : Ui.alpha(tone(0xB38E8E93, 0x8CFFFFFF), fade);
+        float x = MARGIN * k;
+        int coinColor = text.getColor();
         for (int i = 0; i < n; i++) {
             Glyphs.coin(getContext(), c, HomeData.COINS[coins[i]], x + q.glyphs[i] / 2, base - cap / 2, cap, coinColor);
             x += q.glyphs[i] + gap;
@@ -1625,8 +1637,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         text.setColor(textColor);
         String stale = HomeData.staleness(data.pricesAt, 5 * 60_000L);
         if (stale.isEmpty()) return;
-        if (clock) c.drawText(stale, x - spacing + 24 * k + staleQuote.measureText(stale), base, staleQuote);
-        else c.drawText(stale, right - total - 24 * k, base, staleQuote);
+        c.drawText(stale, x - spacing + 24 * k + staleQuote.measureText(stale), base, staleQuote);
     }
 
     private void drawTiles(Canvas c) {
@@ -4171,10 +4182,14 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     /**
      * The round buttons (Live TV, HDMI Inputs and Settings by default): icon-only glass circles (light by day, smoked at
-     * night); the focused one turns white with a dark icon (the tvOS focus) and its name appears below it.
+     * night); the focused one turns white with a dark icon (the tvOS focus) and its name appears at their left. Above
+     * them, the clock (personal), except where the big one already shows the time.
      */
     private void drawLightButtons(Canvas c) {
         applyTone();
+        boolean showClock = !clockMode();
+        float clockLeft = CONTENT_R * k - (showClock ? lTopClock.measureText(topClockText) : 0);
+        if (showClock) c.drawText(topClockText, clockLeft, L_TITLE_BASE * k, lTopClock);
         for (int i = 0; i < lightButtons.size(); i++) {
             HomeApps.Item it = lightButtons.get(i);
             RectF r = topRects[TABS + i];
@@ -4191,18 +4206,17 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 fill.setColor(Ui.alpha(0xFFFFFFFF, f));
                 c.drawCircle(cell.centerX(), cell.centerY(), rad, fill);
             }
-            Symbols.draw(getContext(), c, it.symbol, cell.centerX(), cell.centerY(), 27 * k * s,
+            Symbols.draw(getContext(), c, it.symbol, cell.centerX(), cell.centerY(), 21 * k * s,
                     blend(tone(L_INK, 0xEBFFFFFF), L_INK, f));
             if (f > 0.01f) {
                 String label = it.label;
-                float half = lTip.measureText(label) / 2;
-                float x = Math.min(r.centerX(), CONTENT_R * k - half);
+                float x = topRects[TABS].left - 28 * k - lTip.measureText(label) / 2;
                 lTip.setAlpha(Math.round(255 * f));
-                c.drawText(label, x, r.bottom + (40 + 4 * f) * k, lTip);
+                c.drawText(label, x, r.centerY() + Ui.halfCap(lTip), lTip);
             }
         }
         if (sleepText.isEmpty()) return;
-        float right = (lightButtons.isEmpty() ? CONTENT_R * k : topRects[TABS].left) - 28 * k, cy = L_BUTTON_CY * k;
+        float right = clockLeft - 28 * k, cy = (L_TITLE_BASE - 28) * k;
         float tw = lQuote.measureText(sleepText), size = lQuote.getTextSize();
         c.drawText(sleepText, right - tw, cy + Ui.halfCap(lQuote), lQuote);
         Symbols.draw(getContext(), c, "bedtime", right - tw - size * 0.9f, cy, size, lQuote.getColor());
