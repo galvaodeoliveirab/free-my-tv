@@ -2049,11 +2049,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         c.drawText(Ui.tr("Devices"), x, r.top + 54 * k, cardTitle);
         List<Devices.Device> list = Devices.list();
         String problem = Devices.problem();
-        if (!problem.isEmpty()) {
-            c.drawText(problem, right, r.top + 54 * k, cardDimRight);
-        } else if (here) {
-            c.drawText(Ui.tr("OK connects or disconnects"), right, r.top + 54 * k, cardDimRight);
-        }
+        if (!problem.isEmpty()) c.drawText(problem, right, r.top + 54 * k, cardDimRight);
         if (list.isEmpty()) {
             if (problem.isEmpty()) c.drawText(Ui.tr("Pair a device in the TV's settings."), x, r.top + 130 * k, cardDim);
             return;
