@@ -255,7 +255,8 @@ final class Prefs {
         version++;
     }
 
-    static boolean quotes() { return sp().getBoolean("quotes", Config.SHOW_CRYPTO); }
+    // Personal: no quotes anywhere (home screen, drawer, screensaver); the drawer shows Devices in their place.
+    static boolean quotes() { return false; }
     static void setQuotes(boolean on) { put("quotes", on); }
 
     /** Your photos (Photos, sent from a computer) on the screensaver and behind the home screen, once imported. */

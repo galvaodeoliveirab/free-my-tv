@@ -68,7 +68,8 @@ import java.util.function.Consumer;
  * Measurements are in a 1920×1080 space (k = width / 1920). The screen is split into layers so the TV's weak GPU only
  * redraws what changed.
  */
-final class HomeView extends ViewGroup implements Choreographer.FrameCallback, HomeData.Listener, Recs.Listener {
+final class HomeView extends ViewGroup implements Choreographer.FrameCallback, HomeData.Listener, Recs.Listener,
+        Devices.Listener {
     // tvOS grid (Human Interface Guidelines): content inside the safe area, 80 px from the sides and 60 from top and
     // bottom; 40 px between items; 7 columns of 217 px (the apps). The shelf glass extends 36 px past the tiles (the
     // same padding on all four sides) and the tile corners are concentric with it (glass radius = radius + padding).
@@ -284,6 +285,18 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private Spring[] drawerFocus = new Spring[0];
     private RectF[] drawerRects = new RectF[0];
     private final RectF weatherCard = new RectF(), quotesCard = new RectF();
+    // Personal: the Devices card (paired Bluetooth devices) where the quotes were; ↓ from the drawer's row reaches it.
+    private static final int Z_DEVICES = 11, DEVICE_SLOTS = 4;
+    private int deviceIndex;
+    private final RectF deviceCircle = new RectF();
+    private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Runnable devicesTick = new Runnable() {
+        @Override public void run() {
+            if (!running || !drawerOpen) return;
+            Devices.refresh(getContext(), HomeView.this, 0);
+            handler.postDelayed(this, 8000);
+        }
+    };
     private final Spring drawer = new Spring(0.46f, 0.92f, 0);
     private boolean drawerOpen;
     private int drawerIndex;
@@ -322,7 +335,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     private Paint labelPaint, metaPaint, clockPaint, buttonPaint, capsuleText, tipPaint, quotePaint, staleQuote;
     private Paint rowTitle, drawerLabel, cardTitle, cardText, cardDim, cardDimRight, bigTemp, hourPaint, hourTemp, dayLow;
-    private Paint pricePaint, changePaint, sheetTitle;
+    private Paint pricePaint, changePaint, sheetTitle, deviceName, deviceStatus;
     private TextPaint titlePaint, gridLabel, toastPaint;
     private final Paint bitmapPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
     private final Paint imagePaint = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.DITHER_FLAG);
@@ -528,6 +541,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         recs.addListener(this);
         data.refreshIfStale();
         recs.refreshIfStale();
+        Devices.refresh(getContext(), this, 30_000);
         Photos.importInbox(getContext(), ownReady);   // photos a computer just sent
         if (tvInputs != null) tvInputs.registerCallback(inputCallback, handler);
         handler.postDelayed(tick, 15_000);
@@ -806,6 +820,13 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         pricePaint.setTextAlign(Paint.Align.RIGHT);
         changePaint = Ui.numbers(Ui.semibold, 21 * k, 0xFFFFFFFF);
         changePaint.setTextAlign(Paint.Align.CENTER);
+        deviceName = Ui.text(Ui.medium, 24 * k, 0xF2FFFFFF);
+        deviceName.setTextAlign(Paint.Align.CENTER);
+        deviceStatus = Ui.numbers(Ui.medium, 20 * k, 0xADFFFFFF);
+        deviceStatus.setTextAlign(Paint.Align.CENTER);
+        ring.setStyle(Paint.Style.STROKE);
+        ring.setStrokeCap(Paint.Cap.ROUND);
+        ring.setStrokeWidth(7 * k);
         sheetTitle = Ui.text(Ui.displaySemibold, 40 * k, 0xFFFFFFFF);
         sheetTitle.setTextAlign(Paint.Align.CENTER);
         gridLabel = new TextPaint(Ui.text(Ui.medium, 24 * k, 0x99FFFFFF));
@@ -1872,7 +1893,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             x += tw + gap;
         }
         float cardsTop = CARDS_TOP * k, split = left + (right - left) * 0.585f;
-        boolean wx = Prefs.weather(), qt = Prefs.quotes() && HomeData.active().length > 0;
+        boolean wx = Prefs.weather(), qt = Devices.supported();   // personal: the Devices card in the quotes' place
         // A card that is off gives its room to the other one.
         weatherCard.set(left, cardsTop, qt ? split - 16 * k : right, cardsTop + CARDS_H * k);
         quotesCard.set(wx ? split + 16 * k : left, cardsTop, right, cardsTop + CARDS_H * k);
@@ -1887,6 +1908,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         Symbols.warmWeather(getContext(), 30 * k);
         Symbols.warm(getContext(), "sunrise", 22 * k);
         Symbols.warm(getContext(), "sunset", 22 * k);
+        for (String sym : new String[] {"headphones", "speaker", "gamepad", "keyboard", "mouse", "bluetooth"}) {
+            Symbols.warm(getContext(), sym, 40 * k);
+        }
         drawerDirty = true;
     }
 
@@ -1898,9 +1922,12 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         drawerIndex = shelf.isEmpty() ? 0 : nearest(drawerRects, tileRects[shelfIndex].centerX());
         for (int i = 0; i < drawerFocus.length; i++) drawerFocus[i].snap(i == drawerIndex ? 1 : 0);
         drawerDirty = true;
+        handler.removeCallbacks(devicesTick);
+        handler.post(devicesTick);
     }
 
     private void closeDrawer() {
+        handler.removeCallbacks(devicesTick);
         drawerOpen = false;
         drawer.target = 0;
         zone = Z_SHELF;
@@ -1950,7 +1977,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         for (int i = 0; i < drawerItems.size(); i++) if (i != top) drawDrawerTile(c, i);
         if (top >= 0) drawDrawerTile(c, top);
         if (Prefs.weather()) drawWeatherCard(c, weatherCard);
-        if (Prefs.quotes() && HomeData.active().length > 0) drawQuotesCard(c, quotesCard);
+        if (Devices.supported()) drawDevicesCard(c, quotesCard);
     }
 
     /** Square drawer button: symbol and name; an input with no device is dimmed. Focused: white, with dark text. */
@@ -1985,6 +2012,94 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         String label = TextUtils.ellipsize(it.label, fitPaint, room, TextUtils.TruncateAt.END).toString();
         c.drawText(label, cx, cell.top + cell.height() * 0.8f, drawerLabel);
         drawerLabel.setTextSize(23 * k);
+    }
+
+    @Override public void onDevices() {
+        int n = Devices.list().size();
+        if (zone == Z_DEVICES && n == 0) {
+            zone = Z_DRAWER;
+            retarget(false);
+        }
+        deviceIndex = Math.max(0, Math.min(deviceIndex, n - 1));
+        drawerDirty = true;
+        wake();
+    }
+
+    /** First device shown: the card holds DEVICE_SLOTS, and scrolls to keep the focused one in view. */
+    private int deviceFirst() {
+        int n = Devices.list().size();
+        return Math.max(0, Math.min(deviceIndex - (DEVICE_SLOTS - 1), n - DEVICE_SLOTS));
+    }
+
+    private float deviceCenter(int i) {
+        RectF r = quotesCard;
+        float slot = (r.width() - 40 * k) / DEVICE_SLOTS;
+        return r.left + 20 * k + slot * (i - deviceFirst() + 0.5f);
+    }
+
+    /**
+     * Personal: the paired Bluetooth devices, like the Mac's Batteries widget: a ring per device (the battery when it
+     * tells, else full while connected), its symbol inside, the name and the state under it. OK connects or
+     * disconnects; pairing stays in the TV's settings.
+     */
+    private void drawDevicesCard(Canvas c, RectF r) {
+        drawerCard(c, r);
+        float x = r.left + 34 * k, right = r.right - 34 * k;
+        boolean here = zone == Z_DEVICES && !sheetOpen;
+        c.drawText(Ui.tr("Devices"), x, r.top + 54 * k, cardTitle);
+        List<Devices.Device> list = Devices.list();
+        String problem = Devices.problem();
+        if (!problem.isEmpty()) {
+            c.drawText(problem, right, r.top + 54 * k, cardDimRight);
+        } else if (here) {
+            c.drawText(Ui.tr("OK connects or disconnects"), right, r.top + 54 * k, cardDimRight);
+        }
+        if (list.isEmpty()) {
+            if (problem.isEmpty()) c.drawText(Ui.tr("Pair a device in the TV's settings."), x, r.top + 130 * k, cardDim);
+            return;
+        }
+        deviceName.setColor(drawerInk(0.95f));
+        deviceStatus.setColor(tone(L_DIM, 0xADFFFFFF));
+        int first = deviceFirst();
+        float slot = (r.width() - 40 * k) / DEVICE_SLOTS, d = 112 * k, cy = r.top + 80 * k + d / 2;
+        for (int i = first; i < list.size() && i < first + DEVICE_SLOTS; i++) {
+            Devices.Device dev = list.get(i);
+            boolean focused = here && i == deviceIndex;
+            float cx = deviceCenter(i), rr = d / 2 * (focused ? 1.07f : 1);
+            deviceCircle.set(cx - rr, cy - rr, cx + rr, cy + rr);
+            if (focused) {
+                tmp.set(deviceCircle);
+                tmp.offset(0, 10 * k);
+                shadow.setColor(0x73000000);
+                shadows.draw(c, tmp, rr, SHADOW_BLUR * k, shadow);
+                fill.setShader(null);
+                fill.setColor(WHITE);
+                c.drawOval(deviceCircle, fill);
+            }
+            float inset = ring.getStrokeWidth() / 2 + 2 * k;
+            deviceCircle.inset(inset, inset);
+            ring.setColor(focused ? 0x1F000000 : tone(0x1A000000, 0x2EFFFFFF));
+            c.drawOval(deviceCircle, ring);
+            boolean busy = dev.state != Devices.IDLE;
+            if (dev.connected || busy) {
+                float level = busy ? 0.25f : dev.battery >= 0 ? Math.max(0.04f, dev.battery / 100f) : 1;
+                int color = busy ? tone(L_DIM, 0xCCFFFFFF)
+                        : dev.battery >= 0 && dev.battery <= 20 ? tone(0xFFD70015, DOWN_COLOR) : tone(0xFF248A3D, UP_COLOR);
+                ring.setColor(color);
+                c.drawArc(deviceCircle, -90, 360 * level, false, ring);
+            }
+            int ink = focused ? INK : dev.connected ? drawerInk(0.95f) : tone(0xFF8E8E93, 0x80FFFFFF);
+            Symbols.draw(getContext(), c, dev.symbol, cx, cy, 40 * k, ink);
+            float room = slot - 16 * k;
+            fitPaint.set(deviceName);
+            String name = TextUtils.ellipsize(dev.name, fitPaint, room, TextUtils.TruncateAt.END).toString();
+            c.drawText(name, cx, cy + d / 2 + 42 * k, deviceName);
+            String status = dev.state == Devices.CONNECTING ? Ui.tr("Connecting…")
+                    : dev.state == Devices.DISCONNECTING ? Ui.tr("Disconnecting…")
+                    : !dev.connected ? Ui.tr("Not connected")
+                    : dev.battery >= 0 ? Ui.trf("Connected · {n}%", "n", dev.battery) : Ui.tr("Connected");
+            c.drawText(status, cx, cy + d / 2 + 74 * k, deviceStatus);
+        }
     }
 
     /** Weather for your location: now (large), the next 6 hours or 5 days, and sunrise and sunset. */
@@ -2543,7 +2658,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private void back() {
         if (sheetOpen) {
             closeSheet();
-        } else if (zone == Z_DRAWER || zone == WIDGETS) {
+        } else if (zone == Z_DRAWER || zone == WIDGETS || zone == Z_DEVICES) {
             closeDrawer();
             retarget(false);
         } else if (zone != Z_SHELF) {
@@ -2608,6 +2723,19 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                     return;
                 }
                 break;
+            case Z_DEVICES: {
+                int n = Devices.list().size();
+                if (dy < 0 || n == 0) {
+                    zone = Z_DRAWER;
+                    if (n > 0) drawerIndex = nearest(drawerRects, deviceCenter(deviceIndex));
+                } else if (dx != 0 && deviceIndex + dx >= 0 && deviceIndex + dx < n) {
+                    deviceIndex += dx;
+                } else {
+                    return;
+                }
+                drawerDirty = true;
+                break;
+            }
             case WIDGETS: {
                 List<Integer> on = widgets();
                 int at = on.indexOf(widgetIndex);
@@ -2627,6 +2755,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                     drawerIndex = next;
                 } else if (dy < 0) {
                     closeDrawer();
+                } else if (Devices.supported() && !Devices.list().isEmpty()) {
+                    zone = Z_DEVICES;
+                    deviceIndex = Math.min(deviceIndex, Devices.list().size() - 1);
+                    drawerDirty = true;
                 } else if (talkBack() && !widgets().isEmpty()) {
                     // Only with TalkBack: the widgets are there to be read, and this is how it gets to them.
                     zone = WIDGETS;
@@ -2686,6 +2818,13 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         HomeApps.Item it;
         RectF r;
         if (!sheetOpen && zone == WIDGETS) return;   // a widget is only read
+        if (!sheetOpen && zone == Z_DEVICES) {
+            List<Devices.Device> list = Devices.list();
+            if (deviceIndex >= list.size()) return;
+            click.open();
+            Devices.toggle(getContext(), list.get(deviceIndex), this);
+            return;
+        }
         if (sheetOpen) {
             if (others.isEmpty()) return;
             it = others.get(gridIndex);
