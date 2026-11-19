@@ -2,6 +2,38 @@
 
 <img src="docs/assets/icon-512.png" width="96" alt="">
 
+# Free My TV · versão personalizada
+
+**Minha versão do launcher [Free My TV](https://github.com/simbasjungles/free-my-tv) para Google TV, ajustada para o meu uso numa TCL 65C6K (Android 14).**
+
+</div>
+
+## O que eu adicionei
+
+Todas as mudanças estão no ramo `personalizado` (o `main` acompanha o projeto original).
+
+- **Nota do IMDb** em cada título, via OMDb (com o TMDB como alternativa), ao lado do nome quando ele cabe inteiro.
+- **6 sugestões por aba**, trocando de hora em hora de forma estável, e **"carregar mais 6"** ao passar do último card.
+- **Aba "Locadora"**: filmes para alugar ou comprar no digital. O OK abre um menu de ofertas com **preços por loja** (Watchmode) e leva direto ao app da loja.
+- **Card "Dispositivos"** na gaveta: lista os aparelhos Bluetooth pareados e conecta ou desconecta com o OK (o controle remoto fica oculto).
+- **Relógio fixo no horário de Brasília/Porto Alegre** (24 h) no canto superior direito, com os botões menores logo abaixo.
+- **Layout mais limpo**: uma única margem para a tela toda, prateleira com 6 apps maiores alinhada com as sugestões, espaçamentos de 40 px, cards que só abrem quando recebem o foco e sem as citações.
+- **Mais rápido**: pré-carregamento, montagem dos cards em paralelo e caches maiores.
+
+## Como compilar
+
+As chaves de API (TMDB, OMDb, Watchmode) e a chave de assinatura ficam só na minha máquina (`config.properties` e `*.keystore` estão no `.gitignore`). Para compilar a sua: copie `config.example.properties` para `config.properties`, preencha as chaves e rode `./build.sh`.
+
+## Créditos
+
+Baseado no **[Free My TV](https://github.com/simbasjungles/free-my-tv)**, de [simbasjungles](https://github.com/simbasjungles) e colaboradores, sob a licença MIT (veja [LICENSE](LICENSE)). O README original segue abaixo.
+
+---
+
+<div align="center">
+
+<img src="docs/assets/icon-512.png" width="96" alt="">
+
 # Free My TV
 
 **A fast, ad-free home screen for Google TV, LG and Samsung TVs.**
